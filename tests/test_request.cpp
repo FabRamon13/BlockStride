@@ -11,6 +11,7 @@ TEST(RequestTest, FollowsValidLifecycleToCompletion) {
     Request request(1, 4, 2, 10);
 
     EXPECT_EQ(request.state(), RequestState::WAITING);
+    EXPECT_FALSE(request.terminal_timestamp().has_value());
     request.start(10);
     EXPECT_EQ(request.state(), RequestState::RUNNING);
     request.mark_prefill_completed();
@@ -22,6 +23,8 @@ TEST(RequestTest, FollowsValidLifecycleToCompletion) {
     EXPECT_EQ(request.generated_token_count(), 2);
     ASSERT_TRUE(request.completion_timestamp().has_value());
     EXPECT_EQ(*request.completion_timestamp(), 14);
+    ASSERT_TRUE(request.terminal_timestamp().has_value());
+    EXPECT_EQ(*request.terminal_timestamp(), 14);
 }
 
 TEST(RequestTest, RejectsInvalidTransitionsAndGenerationBeforePrefill) {
@@ -90,13 +93,35 @@ TEST(RequestTest, RejectsTimestampsBeforeArrival) {
 
 TEST(RequestTest, SupportsCancellationFromWaitingAndRunning) {
     Request waiting(1, 2, 1, 10);
+    EXPECT_FALSE(waiting.terminal_timestamp().has_value());
     waiting.cancel(10);
     EXPECT_EQ(waiting.state(), RequestState::CANCELLED);
+    ASSERT_TRUE(waiting.terminal_timestamp().has_value());
+    EXPECT_EQ(*waiting.terminal_timestamp(), 10);
 
     Request running(2, 2, 1, 10);
     running.start(10);
+    running.mark_prefill_completed();
+    running.record_generated_token(11);
     running.cancel(11);
     EXPECT_EQ(running.state(), RequestState::CANCELLED);
+    ASSERT_TRUE(running.terminal_timestamp().has_value());
+    EXPECT_EQ(*running.terminal_timestamp(), 11);
+    EXPECT_FALSE(running.completion_timestamp().has_value());
+}
+
+TEST(RequestTest, RunningCancellationCannotPrecedeFirstToken) {
+    Request request(1, 2, 2, 10);
+    request.start(10);
+    request.mark_prefill_completed();
+    request.record_generated_token(15);
+
+    EXPECT_THROW(request.cancel(14), std::invalid_argument);
+    EXPECT_EQ(request.state(), RequestState::RUNNING);
+    EXPECT_FALSE(request.terminal_timestamp().has_value());
+
+    request.cancel(16);
+    EXPECT_EQ(request.terminal_timestamp(), 16);
 }
 
 TEST(RequestTest, TerminalStatesAreImmutable) {
@@ -106,11 +131,13 @@ TEST(RequestTest, TerminalStatesAreImmutable) {
     completed.record_generated_token(1);
     completed.complete(1);
     EXPECT_THROW(completed.cancel(2), std::logic_error);
+    EXPECT_EQ(*completed.terminal_timestamp(), 1);
 
     Request cancelled(2, 2, 1, 0);
     cancelled.cancel(0);
     EXPECT_THROW(cancelled.start(1), std::logic_error);
     EXPECT_THROW(cancelled.cancel(1), std::logic_error);
+    EXPECT_EQ(*cancelled.terminal_timestamp(), 0);
 }
 
 }  // namespace

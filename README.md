@@ -13,12 +13,27 @@ Requests move through `WAITING`, `RUNNING`, and one terminal state:
 or `CANCELLED`, and `RUNNING` to `COMPLETED` or `CANCELLED`. Generation requires
 completed prefill, cannot exceed the configured token limit, and completion
 requires that limit to be reached.
+Both successful completion and cancellation record a terminal timestamp, while
+the request state distinguishes the terminal outcome.
 
 The FCFS request manager rejects duplicate IDs, orders requests by arrival time
 with stable submission order for ties, and admits only requests that have
 arrived at the current simulated time. It tracks waiting, running, and terminal
 requests and supports cancellation. It does not schedule based on token budgets
 or KV-cache capacity; a scheduler is not implemented yet.
+
+## Paged KV-cache block manager
+
+The block manager tracks request ownership of a bounded pool of fixed-size
+logical token blocks. Configure the total physical block capacity and tokens
+per block; sequence lengths are rounded up to the number of blocks required.
+Requests can grow their allocation as total sequence length increases, and
+release returns all their blocks to the reusable pool. Capacity exhaustion is
+reported as a recoverable allocation result, without changing an existing
+allocation.
+
+This is metadata-only simulation: it does not allocate GPU memory, KV tensors,
+or implement attention or scheduling.
 
 ## Dependencies
 

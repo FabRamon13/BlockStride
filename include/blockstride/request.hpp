@@ -30,6 +30,7 @@ public:
     [[nodiscard]] bool prefill_completed() const noexcept;
     [[nodiscard]] const std::optional<SimulatedTimestamp>& first_token_timestamp() const noexcept;
     [[nodiscard]] const std::optional<SimulatedTimestamp>& completion_timestamp() const noexcept;
+    [[nodiscard]] const std::optional<SimulatedTimestamp>& terminal_timestamp() const noexcept;
 
     void start(SimulatedTimestamp timestamp);
     void mark_prefill_completed();
@@ -49,6 +50,7 @@ private:
     bool prefill_completed_ = false;
     std::optional<SimulatedTimestamp> first_token_timestamp_;
     std::optional<SimulatedTimestamp> completion_timestamp_;
+    std::optional<SimulatedTimestamp> terminal_timestamp_;
 };
 
 }  // namespace blockstride

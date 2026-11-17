@@ -31,6 +31,7 @@ if(BLOCKSTRIDE_ENABLE_SANITIZERS)
 endif()
 
 add_library(blockstride_core STATIC
+    src/block_manager.cpp
     src/request.cpp
     src/request_manager.cpp
     src/version.cpp
@@ -58,6 +59,7 @@ if(BUILD_TESTING)
     endif()
 
     add_executable(blockstride_tests
+        tests/test_block_manager.cpp
         tests/test_request.cpp
         tests/test_request_manager.cpp
         tests/test_smoke.cpp

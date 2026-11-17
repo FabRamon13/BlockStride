@@ -54,6 +54,10 @@ const std::optional<SimulatedTimestamp>& Request::completion_timestamp() const n
     return completion_timestamp_;
 }
 
+const std::optional<SimulatedTimestamp>& Request::terminal_timestamp() const noexcept {
+    return terminal_timestamp_;
+}
+
 void Request::validate_timestamp(SimulatedTimestamp timestamp) const {
     if (timestamp < arrival_timestamp_) {
         throw std::invalid_argument("timestamp cannot precede request arrival");
@@ -112,6 +116,7 @@ void Request::complete(SimulatedTimestamp timestamp) {
     }
 
     completion_timestamp_ = timestamp;
+    terminal_timestamp_ = timestamp;
     state_ = RequestState::COMPLETED;
 }
 
@@ -124,6 +129,7 @@ void Request::cancel(SimulatedTimestamp timestamp) {
         throw std::invalid_argument("cancellation timestamp cannot precede the first token");
     }
 
+    terminal_timestamp_ = timestamp;
     state_ = RequestState::CANCELLED;
 }
 

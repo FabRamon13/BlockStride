@@ -6,13 +6,23 @@
 #include <cstddef>
 #include <functional>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 namespace blockstride {
 
+enum class SchedulingPolicy {
+    SEQUENTIAL,
+    STATIC_BATCHING,
+    CONTINUOUS_BATCHING
+};
+
+[[nodiscard]] std::string_view scheduling_policy_name(SchedulingPolicy policy) noexcept;
+
 struct SchedulerConfig {
     std::size_t max_active_requests;
     std::size_t max_tokens_per_step;
+    SchedulingPolicy policy = SchedulingPolicy::CONTINUOUS_BATCHING;
 };
 
 enum class SubmissionResult {
@@ -88,6 +98,8 @@ private:
     BlockManager block_manager_;
     std::optional<SimulatedTimestamp> current_timestamp_;
     std::vector<RequestId> pending_cancelled_requests_;
+    std::vector<RequestId> static_cohort_;
+    bool static_cohort_active_ = false;
 };
 
 }  // namespace blockstride

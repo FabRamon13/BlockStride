@@ -44,6 +44,9 @@ target_link_libraries(blockstride_core PRIVATE blockstride_options)
 add_executable(blockstride_bench benchmarks/main.cpp)
 target_link_libraries(blockstride_bench PRIVATE blockstride_core blockstride_options)
 
+add_executable(blockstride_policy_demo examples/policy_demo.cpp)
+target_link_libraries(blockstride_policy_demo PRIVATE blockstride_core blockstride_options)
+
 include(CTest)
 if(BUILD_TESTING)
     find_package(GTest QUIET)
@@ -62,6 +65,7 @@ if(BUILD_TESTING)
 
     add_executable(blockstride_tests
         tests/test_block_manager.cpp
+        tests/test_policies.cpp
         tests/test_request.cpp
         tests/test_request_manager.cpp
         tests/test_scheduler.cpp

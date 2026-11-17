@@ -35,6 +35,26 @@ bool can_add(std::uint64_t current, std::uint64_t increment) noexcept {
 
 }  // namespace
 
+std::string_view simulation_status_name(SimulationStatus status) noexcept {
+    switch (status) {
+        case SimulationStatus::COMPLETED:
+            return "completed";
+        case SimulationStatus::EMPTY_WORKLOAD:
+            return "empty-workload";
+        case SimulationStatus::MEMORY_BLOCKED:
+            return "memory-blocked";
+        case SimulationStatus::PERMANENTLY_UNSERVICEABLE:
+            return "permanently-unserviceable";
+        case SimulationStatus::DEADLOCKED:
+            return "deadlocked";
+        case SimulationStatus::TIME_OVERFLOW:
+            return "time-overflow";
+        case SimulationStatus::NO_PROGRESS:
+            return "no-progress";
+    }
+    return "unknown";
+}
+
 SimulationCostModel::SimulationCostModel(SimulationConfig config) : config_(config) {
     static_cast<void>(checked_add(config_.prefill_fixed_us, config_.prefill_per_token_us));
     static_cast<void>(
@@ -310,6 +330,36 @@ SimulationOutcome ExecutionSimulator::make_outcome(
     outcome.outstanding_requests.insert(outcome.outstanding_requests.end(), running.begin(),
                                         running.end());
     return outcome;
+}
+
+std::vector<PolicySimulationResult> compare_scheduling_policies(
+    const std::vector<WorkloadRequest>& workload, SchedulerConfig scheduler_config,
+    std::size_t total_physical_blocks, std::size_t tokens_per_block,
+    SimulationConfig simulation_config) {
+    constexpr SchedulingPolicy policies[] = {
+        SchedulingPolicy::SEQUENTIAL,
+        SchedulingPolicy::STATIC_BATCHING,
+        SchedulingPolicy::CONTINUOUS_BATCHING,
+    };
+
+    std::vector<PolicySimulationResult> results;
+    results.reserve(3);
+    for (const auto policy : policies) {
+        auto policy_config = scheduler_config;
+        policy_config.policy = policy;
+        ExecutionSimulator simulator(policy_config, total_physical_blocks, tokens_per_block,
+                                     simulation_config);
+        std::vector<Request> requests;
+        requests.reserve(workload.size());
+        for (const auto& specification : workload) {
+            requests.emplace_back(specification.id, specification.prompt_token_count,
+                                  specification.max_new_tokens,
+                                  specification.arrival_timestamp);
+        }
+        static_cast<void>(simulator.submit_workload(std::move(requests)));
+        results.push_back({policy, simulator.run()});
+    }
+    return results;
 }
 
 }  // namespace blockstride

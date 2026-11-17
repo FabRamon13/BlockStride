@@ -35,27 +35,34 @@ allocation.
 This is metadata-only simulation: it does not allocate GPU memory, KV tensors,
 or implement attention or scheduling.
 
-## Continuous batching scheduler
+## Scheduling policies
 
-The deterministic single-threaded scheduler admits waiting requests in FCFS
-order, subject to arrival time, active-request capacity, and prompt KV-block
-availability. It prefills each prompt as one operation, then decodes one token
-at a time; requests may join while others remain active. Each step's work-token
-budget counts both prompt tokens processed by prefill and generated tokens
-processed by decode. Prompts larger than that budget are rejected at submit
-time rather than processed as oversized operations.
+The shared deterministic scheduling engine offers three policies, selected
+through `SchedulerConfig::policy` (default: `CONTINUOUS_BATCHING`):
 
-KV-block exhaustion is reported as backpressure and waiting requests are
-preserved. The scheduler does not bypass a blocked oldest eligible request.
-Requests whose full configured sequence cannot fit are reported as
-permanently unserviceable without being silently cancelled. Step results
-distinguish waiting for future arrivals, memory blocking, unserviceable work,
-and deadlock. A future-only result includes the next arrival timestamp; pass it
-to the next `step` call to advance simulated time.
-The memory-blocked list records requests that encountered capacity exhaustion
-during that step, including requests that later progressed after blocks were
-reclaimed in the same step. Cancellation events are reported by the next step
-result.
+- **Sequential** processes one request at a time in FCFS order, completing its
+  prefill and all generation before starting the next request.
+- **Static batching** forms an FCFS cohort at an admission boundary, up to the
+  configured active limit and currently available prompt-block capacity. No
+  replacement enters after cohort formation, even if a member completes
+  early. The next cohort forms only after every member completes or is
+  cancelled. Arrivals during a cohort wait for that next cohort boundary.
+- **Continuous batching** admits eligible FCFS requests between execution
+  steps and admits replacements as active slots and KV blocks become available.
+  A memory-blocked request does not prevent other active requests from
+  progressing when they can.
+
+All policies share the configured active-request limit (sequential applies the
+stricter one-request limit), per-step prompt-plus-decode token budget, KV-block
+capacity and size, request lifecycle, arrival handling, and cost model. A
+blocked oldest eligible request is not bypassed. Requests that cannot ever fit
+are reported as permanently unserviceable; capacity-induced deadlock is
+reported rather than resolved by changing limits or cancelling requests.
+
+`compare_scheduling_policies` accepts one immutable workload description and
+creates independent request-manager, block-manager, and clock state for each
+policy. The `blockstride_policy_demo` executable prints a small synthetic
+comparison; it is not the final benchmark suite.
 
 ## Deterministic execution simulator
 
@@ -81,6 +88,8 @@ from the request's arrival timestamp. Temporary KV-block pressure is reported
 while other work is allowed to progress; permanent unserviceability,
 deadlock, and simulated-time overflow produce explicit outcomes. All modeled
 costs are synthetic: no LLM inference or GPU work is executed.
+These simulated times do not measure CPU scheduling or execution performance,
+and policy results must not be interpreted as measured speedups.
 
 ## Dependencies
 
@@ -96,6 +105,7 @@ Run these commands from the repository root:
 cmake -S . -B build
 cmake --build build
 ./build/blockstride_bench
+./build/blockstride_policy_demo
 ctest --test-dir build --output-on-failure
 ```
 

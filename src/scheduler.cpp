@@ -7,6 +7,18 @@
 
 namespace blockstride {
 
+std::string_view scheduling_policy_name(SchedulingPolicy policy) noexcept {
+    switch (policy) {
+        case SchedulingPolicy::SEQUENTIAL:
+            return "sequential";
+        case SchedulingPolicy::STATIC_BATCHING:
+            return "static-batching";
+        case SchedulingPolicy::CONTINUOUS_BATCHING:
+            return "continuous-batching";
+    }
+    return "unknown";
+}
+
 Scheduler::Scheduler(SchedulerConfig config, std::size_t total_physical_blocks,
                      std::size_t tokens_per_block)
     : config_(config), block_manager_(total_physical_blocks, tokens_per_block) {
@@ -15,6 +27,11 @@ Scheduler::Scheduler(SchedulerConfig config, std::size_t total_physical_blocks,
     }
     if (config_.max_tokens_per_step == 0) {
         throw std::invalid_argument("maximum tokens per step must be greater than zero");
+    }
+    if (config_.policy != SchedulingPolicy::SEQUENTIAL &&
+        config_.policy != SchedulingPolicy::STATIC_BATCHING &&
+        config_.policy != SchedulingPolicy::CONTINUOUS_BATCHING) {
+        throw std::invalid_argument("unsupported scheduling policy");
     }
 }
 
@@ -51,6 +68,20 @@ SchedulerStepResult Scheduler::step(
     pending_cancelled_requests_.clear();
     result.made_progress = !result.cancelled_requests.empty();
 
+    if (config_.policy == SchedulingPolicy::STATIC_BATCHING && static_cohort_active_) {
+        const auto cohort_terminated = std::all_of(
+            static_cohort_.begin(), static_cohort_.end(), [this](RequestId id) {
+                const auto state = request_manager_.get(id).state();
+                return state == RequestState::COMPLETED || state == RequestState::CANCELLED;
+            });
+        if (cohort_terminated) {
+            static_cohort_.clear();
+            static_cohort_active_ = false;
+        }
+    }
+    auto static_admission_closed =
+        config_.policy == SchedulingPolicy::STATIC_BATCHING && static_cohort_active_;
+
     const auto waiting_at_start = request_manager_.waiting_requests();
     for (const auto id : waiting_at_start) {
         if (permanently_unserviceable(request_manager_.get(id))) {
@@ -63,7 +94,12 @@ SchedulerStepResult Scheduler::step(
     while (remaining_tokens > 0 && !time_overflow) {
         bool pass_made_progress = false;
 
-        while (request_manager_.running_requests().size() < config_.max_active_requests) {
+        const auto active_limit =
+            config_.policy == SchedulingPolicy::SEQUENTIAL
+                ? std::size_t{1}
+                : config_.max_active_requests;
+        while (!static_admission_closed &&
+               request_manager_.running_requests().size() < active_limit) {
             const auto waiting = request_manager_.waiting_requests();
             if (waiting.empty()) {
                 break;
@@ -97,7 +133,15 @@ SchedulerStepResult Scheduler::step(
             }
             result.admission_events.push_back({id, execution_timestamp});
             result.admitted_requests.push_back(id);
+            if (config_.policy == SchedulingPolicy::STATIC_BATCHING) {
+                static_cohort_.push_back(id);
+            }
             pass_made_progress = true;
+        }
+        if (config_.policy == SchedulingPolicy::STATIC_BATCHING &&
+            !static_cohort_.empty()) {
+            static_cohort_active_ = true;
+            static_admission_closed = true;
         }
 
         const auto running_for_prefill = request_manager_.running_requests();

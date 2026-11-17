@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -51,6 +52,15 @@ enum class SimulationStatus {
     NO_PROGRESS
 };
 
+[[nodiscard]] std::string_view simulation_status_name(SimulationStatus status) noexcept;
+
+struct WorkloadRequest {
+    RequestId id;
+    std::size_t prompt_token_count;
+    std::size_t max_new_tokens;
+    SimulatedTimestamp arrival_timestamp;
+};
+
 struct RequestSimulationResult {
     RequestId request_id;
     SimulatedTimestamp arrival_timestamp;
@@ -91,6 +101,11 @@ struct SimulationOutcome {
     std::vector<RequestId> outstanding_requests;
 };
 
+struct PolicySimulationResult {
+    SchedulingPolicy policy;
+    SimulationOutcome outcome;
+};
+
 class ExecutionSimulator {
 public:
     ExecutionSimulator(SchedulerConfig scheduler_config, std::size_t total_physical_blocks,
@@ -119,5 +134,10 @@ private:
     std::unordered_map<RequestId, std::size_t> request_result_indices_;
     std::vector<RejectedRequest> rejected_requests_;
 };
+
+[[nodiscard]] std::vector<PolicySimulationResult> compare_scheduling_policies(
+    const std::vector<WorkloadRequest>& workload, SchedulerConfig scheduler_config,
+    std::size_t total_physical_blocks, std::size_t tokens_per_block,
+    SimulationConfig simulation_config);
 
 }  // namespace blockstride

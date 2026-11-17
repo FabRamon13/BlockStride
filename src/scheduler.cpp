@@ -1,0 +1,265 @@
+#include "blockstride/scheduler.hpp"
+
+#include <algorithm>
+#include <limits>
+#include <stdexcept>
+#include <utility>
+
+namespace blockstride {
+
+Scheduler::Scheduler(SchedulerConfig config, std::size_t total_physical_blocks,
+                     std::size_t tokens_per_block)
+    : config_(config), block_manager_(total_physical_blocks, tokens_per_block) {
+    if (config_.max_active_requests == 0) {
+        throw std::invalid_argument("maximum active requests must be greater than zero");
+    }
+    if (config_.max_tokens_per_step == 0) {
+        throw std::invalid_argument("maximum tokens per step must be greater than zero");
+    }
+}
+
+SubmissionResult Scheduler::submit(Request request) {
+    if (request.prompt_token_count() > config_.max_tokens_per_step) {
+        return SubmissionResult::PROMPT_EXCEEDS_STEP_TOKEN_BUDGET;
+    }
+    request_manager_.submit(std::move(request));
+    return SubmissionResult::ACCEPTED;
+}
+
+SchedulerStepResult Scheduler::step(SimulatedTimestamp timestamp) {
+    if (current_timestamp_ && timestamp < *current_timestamp_) {
+        throw std::invalid_argument("scheduler timestamp cannot move backwards");
+    }
+    current_timestamp_ = timestamp;
+
+    SchedulerStepResult result;
+    result.cancelled_requests = std::move(pending_cancelled_requests_);
+    pending_cancelled_requests_.clear();
+    result.made_progress = !result.cancelled_requests.empty();
+
+    const auto waiting_at_start = request_manager_.waiting_requests();
+    for (const auto id : waiting_at_start) {
+        if (permanently_unserviceable(request_manager_.get(id))) {
+            append_unique(result.permanently_unserviceable_requests, id);
+        }
+    }
+
+    auto remaining_tokens = config_.max_tokens_per_step;
+    while (remaining_tokens > 0) {
+        bool pass_made_progress = false;
+
+        while (request_manager_.running_requests().size() < config_.max_active_requests) {
+            const auto waiting = request_manager_.waiting_requests();
+            if (waiting.empty()) {
+                break;
+            }
+
+            const auto id = waiting.front();
+            const auto& request = request_manager_.get(id);
+            if (request.arrival_timestamp() > timestamp) {
+                break;
+            }
+            if (permanently_unserviceable(request)) {
+                append_unique(result.permanently_unserviceable_requests, id);
+                break;
+            }
+
+            const auto allocation =
+                block_manager_.allocate_or_grow(id, request.prompt_token_count());
+            if (allocation == AllocationResult::CAPACITY_EXHAUSTED) {
+                append_unique(result.memory_blocked_requests, id);
+                break;
+            }
+
+            try {
+                const auto admitted = request_manager_.admit_next(timestamp);
+                if (!admitted || *admitted != id) {
+                    throw std::logic_error("request manager admitted an unexpected request");
+                }
+            } catch (...) {
+                block_manager_.release(id);
+                throw;
+            }
+            result.admitted_requests.push_back(id);
+            pass_made_progress = true;
+        }
+
+        const auto running_for_prefill = request_manager_.running_requests();
+        for (const auto id : running_for_prefill) {
+            const auto& request = request_manager_.get(id);
+            if (request.prefill_completed()) {
+                continue;
+            }
+            const auto prompt_tokens = request.prompt_token_count();
+            if (prompt_tokens > remaining_tokens) {
+                break;
+            }
+
+            request_manager_.mark_prefill_completed(id);
+            remaining_tokens -= prompt_tokens;
+            result.tokens_processed += prompt_tokens;
+            result.prefill_completed_requests.push_back(id);
+            pass_made_progress = true;
+        }
+
+        const auto running_for_decode = request_manager_.running_requests();
+        while (remaining_tokens > 0) {
+            bool round_made_progress = false;
+            for (const auto id : running_for_decode) {
+                const auto& request = request_manager_.get(id);
+                if (request.state() != RequestState::RUNNING || !request.prefill_completed() ||
+                    request.generated_token_count() >= request.max_new_tokens()) {
+                    continue;
+                }
+
+                const auto total_tokens =
+                    request.prompt_token_count() + request.generated_token_count() + 1;
+                const auto allocation = block_manager_.allocate_or_grow(id, total_tokens);
+                if (allocation == AllocationResult::CAPACITY_EXHAUSTED) {
+                    append_unique(result.memory_blocked_requests, id);
+                    continue;
+                }
+
+                request_manager_.record_generated_token(id, timestamp);
+                result.generated_tokens.push_back(id);
+                ++result.tokens_processed;
+                --remaining_tokens;
+                round_made_progress = true;
+                pass_made_progress = true;
+
+                const auto& updated_request = request_manager_.get(id);
+                if (updated_request.generated_token_count() ==
+                    updated_request.max_new_tokens()) {
+                    request_manager_.complete(id, timestamp);
+                    block_manager_.release(id);
+                    result.completed_requests.push_back(id);
+                }
+
+                if (remaining_tokens == 0) {
+                    break;
+                }
+            }
+            if (!round_made_progress) {
+                break;
+            }
+        }
+
+        result.made_progress = result.made_progress || pass_made_progress;
+        if (!pass_made_progress || remaining_tokens == 0) {
+            break;
+        }
+    }
+
+    result.next_arrival_timestamp = next_arrival_after(timestamp);
+    result.future_arrivals_remain = result.next_arrival_timestamp.has_value();
+
+    const auto waiting = request_manager_.waiting_requests();
+    const auto running = request_manager_.running_requests();
+    if (result.made_progress) {
+        result.status = SchedulerStepStatus::PROGRESSED;
+    } else if (waiting.empty() && running.empty()) {
+        result.status = SchedulerStepStatus::EMPTY_WORKLOAD;
+    } else if (!result.permanently_unserviceable_requests.empty()) {
+        result.status = SchedulerStepStatus::PERMANENTLY_UNSERVICEABLE;
+    } else if (!result.memory_blocked_requests.empty()) {
+        result.status = active_work_can_progress() ? SchedulerStepStatus::MEMORY_BLOCKED
+                                                  : SchedulerStepStatus::DEADLOCKED;
+    } else if (running.empty() && result.future_arrivals_remain) {
+        result.status = SchedulerStepStatus::WAITING_FOR_ARRIVAL;
+    } else {
+        result.status = SchedulerStepStatus::DEADLOCKED;
+    }
+
+    return result;
+}
+
+void Scheduler::cancel(RequestId id, SimulatedTimestamp timestamp) {
+    if (current_timestamp_ && timestamp < *current_timestamp_) {
+        throw std::invalid_argument("cancellation timestamp cannot precede scheduler time");
+    }
+
+    const auto& request = request_manager_.get(id);
+    const auto running = request.state() == RequestState::RUNNING;
+    if (running) {
+        static_cast<void>(block_manager_.allocated_blocks(id));
+    }
+
+    pending_cancelled_requests_.push_back(id);
+    try {
+        request_manager_.cancel(id, timestamp);
+    } catch (...) {
+        pending_cancelled_requests_.pop_back();
+        throw;
+    }
+
+    if (running) {
+        block_manager_.release(id);
+    }
+    current_timestamp_ = timestamp;
+}
+
+const RequestManager& Scheduler::request_manager() const noexcept {
+    return request_manager_;
+}
+
+const BlockManager& Scheduler::block_manager() const noexcept {
+    return block_manager_;
+}
+
+const SchedulerConfig& Scheduler::config() const noexcept {
+    return config_;
+}
+
+bool Scheduler::permanently_unserviceable(const Request& request) const noexcept {
+    const auto prompt_tokens = request.prompt_token_count();
+    const auto generation_tokens = request.max_new_tokens();
+    if (generation_tokens > std::numeric_limits<std::size_t>::max() - prompt_tokens) {
+        return true;
+    }
+    const auto maximum_sequence_tokens = prompt_tokens + generation_tokens;
+    return block_manager_.blocks_needed(maximum_sequence_tokens) >
+           block_manager_.total_physical_blocks();
+}
+
+bool Scheduler::active_work_can_progress() const {
+    for (const auto id : request_manager_.running_requests()) {
+        const auto& request = request_manager_.get(id);
+        if (!request.prefill_completed()) {
+            return true;
+        }
+        if (request.generated_token_count() >= request.max_new_tokens()) {
+            continue;
+        }
+
+        const auto current_sequence_tokens =
+            request.prompt_token_count() + request.generated_token_count();
+        const auto next_blocks =
+            block_manager_.blocks_needed(current_sequence_tokens + 1);
+        const auto allocated_blocks = block_manager_.allocated_blocks(id).size();
+        if (next_blocks <= allocated_blocks ||
+            next_blocks - allocated_blocks <= block_manager_.free_block_count()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::optional<SimulatedTimestamp> Scheduler::next_arrival_after(
+    SimulatedTimestamp timestamp) const {
+    std::optional<SimulatedTimestamp> next_arrival;
+    for (const auto id : request_manager_.waiting_requests()) {
+        const auto arrival = request_manager_.get(id).arrival_timestamp();
+        if (arrival > timestamp && (!next_arrival || arrival < *next_arrival)) {
+            next_arrival = arrival;
+        }
+    }
+    return next_arrival;
+}
+
+void Scheduler::append_unique(std::vector<RequestId>& requests, RequestId id) {
+    if (std::find(requests.begin(), requests.end(), id) == requests.end()) {
+        requests.push_back(id);
+    }
+}
+
+}  // namespace blockstride

@@ -34,6 +34,7 @@ add_library(blockstride_core STATIC
     src/block_manager.cpp
     src/request.cpp
     src/request_manager.cpp
+    src/scheduler.cpp
     src/version.cpp
 )
 target_include_directories(blockstride_core PUBLIC include)
@@ -62,6 +63,7 @@ if(BUILD_TESTING)
         tests/test_block_manager.cpp
         tests/test_request.cpp
         tests/test_request_manager.cpp
+        tests/test_scheduler.cpp
         tests/test_smoke.cpp
     )
     target_link_libraries(blockstride_tests PRIVATE blockstride_core GTest::gtest_main blockstride_options)

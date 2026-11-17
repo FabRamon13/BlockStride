@@ -35,6 +35,28 @@ allocation.
 This is metadata-only simulation: it does not allocate GPU memory, KV tensors,
 or implement attention or scheduling.
 
+## Continuous batching scheduler
+
+The deterministic single-threaded scheduler admits waiting requests in FCFS
+order, subject to arrival time, active-request capacity, and prompt KV-block
+availability. It prefills each prompt as one operation, then decodes one token
+at a time; requests may join while others remain active. Each step's work-token
+budget counts both prompt tokens processed by prefill and generated tokens
+processed by decode. Prompts larger than that budget are rejected at submit
+time rather than processed as oversized operations.
+
+KV-block exhaustion is reported as backpressure and waiting requests are
+preserved. The scheduler does not bypass a blocked oldest eligible request.
+Requests whose full configured sequence cannot fit are reported as
+permanently unserviceable without being silently cancelled. Step results
+distinguish waiting for future arrivals, memory blocking, unserviceable work,
+and deadlock. A future-only result includes the next arrival timestamp; pass it
+to the next `step` call to advance simulated time.
+The memory-blocked list records requests that encountered capacity exhaustion
+during that step, including requests that later progressed after blocks were
+reclaimed in the same step. Cancellation events are reported by the next step
+result.
+
 ## Dependencies
 
 - CMake 3.20 or newer

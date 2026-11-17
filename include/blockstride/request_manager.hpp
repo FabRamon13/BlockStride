@@ -12,6 +12,8 @@ class RequestManager {
 public:
     void submit(Request request);
     [[nodiscard]] std::optional<RequestId> admit_next(SimulatedTimestamp current_timestamp);
+    [[nodiscard]] std::optional<RequestId> admit_next(
+        SimulatedTimestamp eligible_timestamp, SimulatedTimestamp start_timestamp);
 
     void mark_prefill_completed(RequestId id);
     void record_generated_token(RequestId id, SimulatedTimestamp timestamp);

@@ -27,12 +27,26 @@ SubmissionResult Scheduler::submit(Request request) {
 }
 
 SchedulerStepResult Scheduler::step(SimulatedTimestamp timestamp) {
+    const auto instantaneous = [timestamp](std::size_t) {
+        return std::optional<SimulatedTimestamp>{timestamp};
+    };
+    return step(timestamp, instantaneous, instantaneous);
+}
+
+SchedulerStepResult Scheduler::step(
+    SimulatedTimestamp timestamp, const StageCompletionCallback& prefill_completion,
+    const StageCompletionCallback& decode_batch_completion) {
+    if (!prefill_completion || !decode_batch_completion) {
+        throw std::invalid_argument("scheduler stage callbacks must be provided");
+    }
     if (current_timestamp_ && timestamp < *current_timestamp_) {
         throw std::invalid_argument("scheduler timestamp cannot move backwards");
     }
     current_timestamp_ = timestamp;
 
     SchedulerStepResult result;
+    result.step_start_timestamp = timestamp;
+    auto execution_timestamp = timestamp;
     result.cancelled_requests = std::move(pending_cancelled_requests_);
     pending_cancelled_requests_.clear();
     result.made_progress = !result.cancelled_requests.empty();
@@ -45,7 +59,8 @@ SchedulerStepResult Scheduler::step(SimulatedTimestamp timestamp) {
     }
 
     auto remaining_tokens = config_.max_tokens_per_step;
-    while (remaining_tokens > 0) {
+    bool time_overflow = false;
+    while (remaining_tokens > 0 && !time_overflow) {
         bool pass_made_progress = false;
 
         while (request_manager_.running_requests().size() < config_.max_active_requests) {
@@ -72,7 +87,7 @@ SchedulerStepResult Scheduler::step(SimulatedTimestamp timestamp) {
             }
 
             try {
-                const auto admitted = request_manager_.admit_next(timestamp);
+                const auto admitted = request_manager_.admit_next(timestamp, execution_timestamp);
                 if (!admitted || *admitted != id) {
                     throw std::logic_error("request manager admitted an unexpected request");
                 }
@@ -80,6 +95,7 @@ SchedulerStepResult Scheduler::step(SimulatedTimestamp timestamp) {
                 block_manager_.release(id);
                 throw;
             }
+            result.admission_events.push_back({id, execution_timestamp});
             result.admitted_requests.push_back(id);
             pass_made_progress = true;
         }
@@ -95,16 +111,33 @@ SchedulerStepResult Scheduler::step(SimulatedTimestamp timestamp) {
                 break;
             }
 
+            const auto completion_time = prefill_completion(prompt_tokens);
+            if (!completion_time) {
+                time_overflow = true;
+                break;
+            }
+            if (*completion_time < execution_timestamp) {
+                throw std::invalid_argument("prefill completion time cannot move backwards");
+            }
+            execution_timestamp = *completion_time;
+            current_timestamp_ = execution_timestamp;
             request_manager_.mark_prefill_completed(id);
             remaining_tokens -= prompt_tokens;
             result.tokens_processed += prompt_tokens;
+            result.prefill_tokens_processed += prompt_tokens;
             result.prefill_completed_requests.push_back(id);
             pass_made_progress = true;
         }
 
+        if (time_overflow) {
+            result.made_progress = result.made_progress || pass_made_progress;
+            break;
+        }
+
         const auto running_for_decode = request_manager_.running_requests();
         while (remaining_tokens > 0) {
-            bool round_made_progress = false;
+            std::vector<RequestId> decode_batch;
+            auto available_blocks = block_manager_.free_block_count();
             for (const auto id : running_for_decode) {
                 const auto& request = request_manager_.get(id);
                 if (request.state() != RequestState::RUNNING || !request.prefill_completed() ||
@@ -114,48 +147,79 @@ SchedulerStepResult Scheduler::step(SimulatedTimestamp timestamp) {
 
                 const auto total_tokens =
                     request.prompt_token_count() + request.generated_token_count() + 1;
-                const auto allocation = block_manager_.allocate_or_grow(id, total_tokens);
-                if (allocation == AllocationResult::CAPACITY_EXHAUSTED) {
+                const auto needed_blocks = block_manager_.blocks_needed(total_tokens);
+                const auto allocated_blocks = block_manager_.allocated_blocks(id).size();
+                const auto additional_blocks =
+                    needed_blocks > allocated_blocks ? needed_blocks - allocated_blocks : 0;
+                if (additional_blocks > available_blocks) {
                     append_unique(result.memory_blocked_requests, id);
                     continue;
                 }
+                available_blocks -= additional_blocks;
+                decode_batch.push_back(id);
+                if (decode_batch.size() == remaining_tokens) {
+                    break;
+                }
+            }
 
-                request_manager_.record_generated_token(id, timestamp);
+            if (decode_batch.empty()) {
+                break;
+            }
+
+            const auto completion_time = decode_batch_completion(decode_batch.size());
+            if (!completion_time) {
+                time_overflow = true;
+                break;
+            }
+            if (*completion_time < execution_timestamp) {
+                throw std::invalid_argument("decode completion time cannot move backwards");
+            }
+            execution_timestamp = *completion_time;
+            current_timestamp_ = execution_timestamp;
+            ++result.decode_batch_count;
+
+            for (const auto id : decode_batch) {
+                const auto& request = request_manager_.get(id);
+                const auto total_tokens =
+                    request.prompt_token_count() + request.generated_token_count() + 1;
+                if (block_manager_.allocate_or_grow(id, total_tokens) !=
+                    AllocationResult::SUCCESS) {
+                    throw std::logic_error("planned decode allocation unexpectedly failed");
+                }
+
+                request_manager_.record_generated_token(id, execution_timestamp);
                 result.generated_tokens.push_back(id);
                 ++result.tokens_processed;
+                ++result.decode_tokens_processed;
                 --remaining_tokens;
-                round_made_progress = true;
                 pass_made_progress = true;
 
                 const auto& updated_request = request_manager_.get(id);
                 if (updated_request.generated_token_count() ==
                     updated_request.max_new_tokens()) {
-                    request_manager_.complete(id, timestamp);
+                    request_manager_.complete(id, execution_timestamp);
                     block_manager_.release(id);
                     result.completed_requests.push_back(id);
                 }
-
-                if (remaining_tokens == 0) {
-                    break;
-                }
-            }
-            if (!round_made_progress) {
-                break;
             }
         }
 
         result.made_progress = result.made_progress || pass_made_progress;
-        if (!pass_made_progress || remaining_tokens == 0) {
+        if (time_overflow || !pass_made_progress || remaining_tokens == 0) {
             break;
         }
     }
 
-    result.next_arrival_timestamp = next_arrival_after(timestamp);
+    result.step_end_timestamp = execution_timestamp;
+    result.time_overflow = time_overflow;
+    result.next_arrival_timestamp = next_arrival_after(execution_timestamp);
     result.future_arrivals_remain = result.next_arrival_timestamp.has_value();
 
     const auto waiting = request_manager_.waiting_requests();
     const auto running = request_manager_.running_requests();
-    if (result.made_progress) {
+    if (result.time_overflow) {
+        result.status = SchedulerStepStatus::TIME_OVERFLOW;
+    } else if (result.made_progress) {
         result.status = SchedulerStepStatus::PROGRESSED;
     } else if (waiting.empty() && running.empty()) {
         result.status = SchedulerStepStatus::EMPTY_WORKLOAD;

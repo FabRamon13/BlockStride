@@ -38,19 +38,27 @@ void RequestManager::submit(Request request) {
 }
 
 std::optional<RequestId> RequestManager::admit_next(SimulatedTimestamp current_timestamp) {
+    return admit_next(current_timestamp, current_timestamp);
+}
+
+std::optional<RequestId> RequestManager::admit_next(SimulatedTimestamp eligible_timestamp,
+                                                    SimulatedTimestamp start_timestamp) {
+    if (start_timestamp < eligible_timestamp) {
+        throw std::invalid_argument("request start time cannot precede eligibility time");
+    }
     if (waiting_requests_.empty()) {
         return std::nullopt;
     }
 
     const auto id = waiting_requests_.front();
     auto& request = get_mutable(id);
-    if (request.arrival_timestamp() > current_timestamp) {
+    if (request.arrival_timestamp() > eligible_timestamp) {
         return std::nullopt;
     }
 
     running_requests_.push_back(id);
     try {
-        request.start(current_timestamp);
+        request.start(start_timestamp);
     } catch (...) {
         running_requests_.pop_back();
         throw;

@@ -282,6 +282,7 @@ TEST(SchedulerTest, CompetingRequestsNeverShareTheFinalFreeBlock) {
     ASSERT_EQ(scheduler.block_manager().free_block_count(), 1);
 
     const auto decode_result = scheduler.step(0);
+    EXPECT_EQ(decode_result.status, SchedulerStepStatus::PROGRESSED);
     EXPECT_EQ(decode_result.memory_blocked_requests, (std::vector<RequestId>{2}));
     EXPECT_EQ(decode_result.generated_tokens, (std::vector<RequestId>{1, 1, 2, 2}));
     EXPECT_EQ(decode_result.completed_requests, (std::vector<RequestId>{1, 2}));

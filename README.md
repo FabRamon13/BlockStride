@@ -16,11 +16,11 @@ requires that limit to be reached.
 Both successful completion and cancellation record a terminal timestamp, while
 the request state distinguishes the terminal outcome.
 
-The FCFS request manager rejects duplicate IDs, orders requests by arrival time
-with stable submission order for ties, and admits only requests that have
-arrived at the current simulated time. It tracks waiting, running, and terminal
-requests and supports cancellation. It does not schedule based on token budgets
-or KV-cache capacity; a scheduler is not implemented yet.
+The FCFS request manager rejects duplicate IDs, orders requests by arrival time with
+stable submission order for ties, and admits only requests that have arrived
+at the current simulated time. It tracks waiting, running, and terminal
+requests and supports cancellation. It remains independent of token budgets
+and KV-cache capacity; those decisions belong to the scheduler.
 
 ## Paged KV-cache block manager
 
@@ -56,6 +56,31 @@ The memory-blocked list records requests that encountered capacity exhaustion
 during that step, including requests that later progressed after blocks were
 reclaimed in the same step. Cancellation events are reported by the next step
 result.
+
+## Deterministic execution simulator
+
+The discrete-event simulator coordinates the scheduler and a simulated clock.
+It serializes prefill and decode stages and advances time only by configured
+synthetic costs or directly to the next future arrival; it never sleeps or
+uses wall-clock time. Arrival events during a scheduler step are considered at
+the next scheduler boundary, not in the middle of an executing batch.
+
+Each request's prefill is one operation with cost
+`prefill_fixed_us + prefill_per_token_us * prompt_tokens`. Decode work is
+grouped into round-robin batches with cost
+`decode_fixed_batch_us + decode_per_token_us * generated_tokens_in_batch`;
+the fixed decode cost is charged once per batch. Zero-work operations cost
+nothing. The existing per-step token budget counts both prompt tokens in
+prefill and generated tokens in decode.
+
+A request starts when it is admitted for processing. Prefill completes before
+decode begins. First-token time is recorded at the end of the decode batch
+that produces the first token, and completion time is recorded at the end of
+the final decode batch. Time-to-first-token and completion latency are measured
+from the request's arrival timestamp. Temporary KV-block pressure is reported
+while other work is allowed to progress; permanent unserviceability,
+deadlock, and simulated-time overflow produce explicit outcomes. All modeled
+costs are synthetic: no LLM inference or GPU work is executed.
 
 ## Dependencies
 

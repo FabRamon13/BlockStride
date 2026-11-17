@@ -1,0 +1,25 @@
+# CMake build directories and generated files
+/build/
+/build-*/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+
+# macOS
+.DS_Store
+
+# Editor and IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Generated benchmark results
+/results/*.csv
+/results/*.json
+/results/*.log
+/results/*.txt

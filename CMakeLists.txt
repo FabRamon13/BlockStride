@@ -30,7 +30,11 @@ if(BLOCKSTRIDE_ENABLE_SANITIZERS)
     endif()
 endif()
 
-add_library(blockstride_core STATIC src/version.cpp)
+add_library(blockstride_core STATIC
+    src/request.cpp
+    src/request_manager.cpp
+    src/version.cpp
+)
 target_include_directories(blockstride_core PUBLIC include)
 target_link_libraries(blockstride_core PRIVATE blockstride_options)
 
@@ -53,7 +57,11 @@ if(BUILD_TESTING)
         FetchContent_MakeAvailable(googletest)
     endif()
 
-    add_executable(blockstride_tests tests/test_smoke.cpp)
+    add_executable(blockstride_tests
+        tests/test_request.cpp
+        tests/test_request_manager.cpp
+        tests/test_smoke.cpp
+    )
     target_link_libraries(blockstride_tests PRIVATE blockstride_core GTest::gtest_main blockstride_options)
 
     include(GoogleTest)

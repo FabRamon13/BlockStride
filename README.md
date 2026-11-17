@@ -6,6 +6,20 @@ metadata-level paged KV-cache management, request lifecycles, deterministic
 execution simulation, and reproducible benchmarking. It does not run LLM
 inference or require a GPU.
 
+## Request lifecycle
+
+Requests move through `WAITING`, `RUNNING`, and one terminal state:
+`COMPLETED` or `CANCELLED`. The valid transitions are `WAITING` to `RUNNING`
+or `CANCELLED`, and `RUNNING` to `COMPLETED` or `CANCELLED`. Generation requires
+completed prefill, cannot exceed the configured token limit, and completion
+requires that limit to be reached.
+
+The FCFS request manager rejects duplicate IDs, orders requests by arrival time
+with stable submission order for ties, and admits only requests that have
+arrived at the current simulated time. It tracks waiting, running, and terminal
+requests and supports cancellation. It does not schedule based on token budgets
+or KV-cache capacity; a scheduler is not implemented yet.
+
 ## Dependencies
 
 - CMake 3.20 or newer
